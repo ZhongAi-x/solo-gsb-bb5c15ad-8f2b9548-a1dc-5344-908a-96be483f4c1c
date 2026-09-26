@@ -5,7 +5,9 @@
 （停留 / 移动时长）并检测**单点漂移跳点**（可下载修复后的 GPX）；支持按 1～100 米
 误差阈值做 **Douglas-Peucker 轨迹精简**（预览叠加精简线、显示前后点数、可下载精简后的
 GPX）；可再上传第二条轨迹做**双人轨迹相遇分析**（时间重叠范围内距离 ≤ 50 米且持续
-≥ 60 秒的区间，列出起止时间、时长与最近距离）；在**无底图**预览图上点击敏感地点
+≥ 60 秒的区间，列出起止时间、时长与最近距离）；可在预览图上添加**命名检查点**
+（最多 10 个圆形检查点，半径 1～1000 米、默认 50 米，与遮蔽圆分别管理），自动列出
+**每次进入 / 离开时间与停留秒数**；在**无底图**预览图上点击敏感地点
 （如家、公司）并设定遮蔽半径，系统按**轨迹线段与遮蔽圆的交点**精确裁切，导出为
 **互不连接的 GPX `trkseg`** 后再分享。
 
@@ -37,6 +39,7 @@ docker compose up --build
 | 停留判定口径 | `app/stay.py` 中 `STAY_RADIUS_M` / `MIN_STAY_S` / `MAX_GAP_S` | 30 米 / 3 分钟 / 10 分钟（记录中断阈值） |
 | 陡坡判定口径 | `app/steep.py` 中 `WINDOW_M` / `WINDOW_STEP_M` / `GRADE_THRESHOLD` / `MIN_SECTION_M` | 100 米窗口 / 20 米前移 / 8% 坡度 / 最小 100 米 |
 | 相遇判定口径 | `app/encounter.py` 中 `MEET_RADIUS_M` / `MIN_MEET_S` / `MAX_GAP_S` | 50 米 / 60 秒 / 10 分钟（断档阈值） |
+| 检查点口径 | `app/checkpoint.py` 中 `MAX_CHECKPOINTS` / `DEFAULT_RADIUS_M` / `MIN_RADIUS_M` / `MAX_RADIUS_M` / `MAX_GAP_S` | 最多 10 个 / 默认 50 米 / 1～1000 米 / 600 秒（断档阈值） |
 | 数据存储 | 内存 | 演示用途：轨迹仅存内存，容器重启即清空，无需数据库 |
 
 无其他必需配置（不需要 API Key、不依赖外部服务）。
@@ -65,11 +68,16 @@ docker compose up --build
    （复用同一上传接口），页面自动分析并列出**每次相遇的起止时间、持续时长与最近距离**，
    相遇位置以粉红色"遇"标记在预览图上；无相遇时显示空结果。对比轨迹仅用于相遇分析，
    不影响当前轨迹的遮蔽、配速、海拔、陡坡、漂移、停留与精简结果。
-9. **设置遮蔽**：在右侧预览图上**点击**敏感地点即添加遮蔽圆，半径在左侧面板设定
-   （添加前设定新圆半径；已有圆可在列表中单独修改或删除）。
-10. **查看裁切结果**：页面实时显示 **隐藏段数**、**裁切前距离**、**裁切后距离** 与可见分段数；
+9. **添加检查点并查看到访**（可选）：把面板顶部的编辑模式切换为**检查点**后，在预览图上
+   **点击**即可添加圆形检查点（最多 10 个，半径 1～1000 米、默认 50 米，与遮蔽圆分别管理、
+   互不影响）；每个检查点可在列表中**命名**、单独修改半径或删除。页面自动逐检查点列出
+   **每次进入、离开时间及停留秒数**（基于原始轨迹计算，不修改原轨迹），未到访的检查点
+   显示"未到访"空态；检查点以靛蓝色圆圈与名称标在预览图上。
+10. **设置遮蔽**：把编辑模式切回**遮蔽圆**，在右侧预览图上**点击**敏感地点即添加遮蔽圆，
+    半径在左侧面板设定（添加前设定新圆半径；已有圆可在列表中单独修改或删除）。
+11. **查看裁切结果**：页面实时显示 **隐藏段数**、**裁切前距离**、**裁切后距离** 与可见分段数；
     蓝色为可见轨迹，红色虚线为被隐藏段。
-11. **下载**：点击"下载遮蔽后的 GPX"，得到一条 `trk` 下多个互不连接的 `trkseg`。
+12. **下载**：点击"下载遮蔽后的 GPX"，得到一条 `trk` 下多个互不连接的 `trkseg`。
 
 ## 分段配速规则（实现要点）
 
@@ -193,6 +201,27 @@ docker compose up --build
   以及最近时刻两人位置的中点（页面"遇"标记）；无相遇时 `encounters` 为空数组，
   页面显示空结果。
 
+## 检查点到访规则（实现要点）
+
+- **基于原始轨迹**：到访分析使用上传时保存的原始 GPX（各原始 `trkseg`），
+  **不修改原轨迹**，与遮蔽裁切、配速、海拔、漂移修复、停留识别、精简、相遇互不影响；
+  检查点与遮蔽圆**分别管理**（前端各自独立的列表与编辑模式，后端各自独立的接口）。
+- **检查点口径**：最多 **10 个**圆形检查点（超出返回 422），半径 **1～1000 米**、
+  默认 **50 米**（超出范围返回 422），每个检查点可命名（最长 50 字符）。
+- **圆内区间**：对每个检查点独立分析——在**圆心局部米制投影**（等距圆柱，与遮蔽裁切
+  同一线段-圆求交）中求每条采样线段落在圆内的参数区间，**进出时间按线段比例**在线段
+  起止时间之间线性插值；**两端都在圆外但线段穿圆**（判别式 > 0）同样识别，
+  **相切**（判别式 = 0）只是瞬时接触，不计入。
+- **断档与分段**：相邻采样间隔超过 **600 秒**视为断档，断档处不构造线段、不插值，
+  断档两侧的圆内区间不合并；`trkseg` 边界同样断开，**绝不跨 trkseg 或断档合并**。
+- **合并与过滤**：同一检查点、同一 `trkseg` 内连续（相接或重叠）的圆内区间合并为
+  一次到访，**仅列出正时长**的到访（零时长区间不计）；到访起止落在采样点上
+  （该点在圆内）时直接使用**该连续记录的端点原始时间**，不做外推。
+- **时间校验**：`trkseg` 内相邻点时间必须严格递增；遇零时差或倒序，接口返回 400
+  并给出"第 N 个 trkseg 中第 i→i+1 个轨迹点的时间未递增"的明确提示。
+- **结果口径**：逐检查点返回每次到访的进入 / 离开时间（ISO）与停留秒数，
+  以及到访次数与累计停留秒数；未到访的检查点 `visits` 为空数组，页面显示"未到访"空态。
+
 ## 裁切规则（实现要点）
 
 - **穿越识别**：对每个原始采样线段与每个遮蔽圆求解析交点（局部切平面投影中解二次方程），
@@ -209,8 +238,8 @@ docker compose up --build
 
 ```
 app/
-  main.py          # FastAPI 路由：/api/upload、/api/mask、/api/export、/api/pace、/api/elevation、/api/steep-sections、/api/drift、/api/drift/export、/api/stays、/api/simplify、/api/simplify/export、/api/encounters、静态页面
-  geo.py           # 几何核心：haversine、点到线段距离、线段-圆求交、按可见性裁切
+  main.py          # FastAPI 路由：/api/upload、/api/mask、/api/export、/api/pace、/api/elevation、/api/steep-sections、/api/drift、/api/drift/export、/api/stays、/api/simplify、/api/simplify/export、/api/encounters、/api/checkpoint-visits、静态页面
+  geo.py           # 几何核心：haversine、局部米制投影、点到线段距离、线段-圆求交、按可见性裁切
   pace.py          # 分段配速：按固定里程切段、边界时间插值
   elevation.py     # 海拔剖面：20 米重采样、三点中位数、5 米反向确认峰谷、累计爬升/下降
   steep.py         # 持续陡坡：复用平滑剖面，100 米窗口/20 米前移，±8% 标记、同向相邻合并、≥100 米过滤
@@ -218,9 +247,10 @@ app/
   stay.py          # 停留识别：锚点扩展（30 米 / 3 分钟）、记录中断（10 分钟）、记录/停留/移动时长
   simplify.py      # 轨迹精简：局部米制投影、迭代式 Douglas-Peucker（点到有限线段距离）
   encounter.py     # 双人轨迹相遇：带时间线段、断档剔除、局部米制平面求距、区间合并与时长过滤
+  checkpoint.py    # 检查点到访：线段-圆求交、进出时间插值、断档/分段断开、区间合并与正时长过滤
   gpxutil.py       # GPX 1.1 解析（强制要求 time）与多 trkseg 导出
   static/          # 原生 JS 前端（index.html / app.js / style.css）
-tests/             # 单元测试：test_geo.py（裁切 9 项）、test_pace.py（配速 8 项）、test_elevation.py（海拔 13 项）、test_steep.py（陡坡 15 项）、test_drift.py（漂移 12 项）、test_stay.py（停留 14 项）、test_simplify.py（精简 17 项）、test_encounter.py（相遇 16 项）
+tests/             # 单元测试：test_geo.py（裁切 9 项）、test_pace.py（配速 8 项）、test_elevation.py（海拔 13 项）、test_steep.py（陡坡 15 项）、test_drift.py（漂移 12 项）、test_stay.py（停留 14 项）、test_simplify.py（精简 17 项）、test_encounter.py（相遇 16 项）、test_checkpoint.py（检查点 19 项）
 examples/sample.gpx# 示例轨迹（两个 trkseg，含时间与海拔）
 Dockerfile         # python:3.12-slim，构建期安装依赖，启动即运行
 docker-compose.yml # 单服务，映射 8000 端口
@@ -242,6 +272,7 @@ python3 tests/test_drift.py      # 单点漂移检测与修复
 python3 tests/test_stay.py       # 停留识别与记录/移动时长
 python3 tests/test_simplify.py   # 轨迹精简（Douglas-Peucker）
 python3 tests/test_encounter.py  # 双人轨迹相遇
+python3 tests/test_checkpoint.py # 检查点到访
 # 或：python3 -m pytest tests/
 ```
 
@@ -261,6 +292,7 @@ python3 tests/test_encounter.py  # 双人轨迹相遇
 | `POST` | `/api/simplify` | `{track_id, tolerance_m?}` → 精简后分段、前后点数与距离（见下） |
 | `POST` | `/api/simplify/export` | 同上参数，返回精简后的 GPX 文件下载 |
 | `POST` | `/api/encounters` | `{track_id, other_track_id}` → 双人轨迹相遇列表（见下） |
+| `POST` | `/api/checkpoint-visits` | `{track_id, checkpoints:[{lat,lon,radius_m?,name?}]}` → 逐检查点到访列表（见下） |
 
 ### `POST /api/pace` 分段配速
 
@@ -403,4 +435,29 @@ curl -X POST http://localhost:8000/api/simplify \
 curl -X POST http://localhost:8000/api/encounters \
   -H "Content-Type: application/json" \
   -d '{"track_id": "<当前轨迹 track_id>", "other_track_id": "<对比轨迹 track_id>"}'
+```
+
+### `POST /api/checkpoint-visits` 检查点到访
+
+- **参数**：`track_id`（必填，上传返回值）；`checkpoints`（必填，检查点列表，
+  **最多 10 个**，超出返回 422）。每个检查点含 `lat` / `lon`（必填）、
+  `radius_m`（可选，**1～1000 米**，默认 **50**，超出范围返回 422）、
+  `name`（可选，最长 50 字符）。
+- **返回**：`checkpoints`（与请求一一对应；每项含 `index`（序号，从 1 开始）、
+  `name`、`lat` / `lon` / `radius_m`、`visit_count`（到访次数）、
+  `total_duration_s`（累计停留秒数）与 `visits`（到访列表，按时间先后；
+  每次含 `seg_index`（原始 `trkseg` 序号）、`start_time` / `end_time`
+  （ISO 时间，穿越圆边界时为按线段比例插值的时刻，起止在圆内时为该连续记录的
+  端点原始时间）、`duration_s`（停留秒数，恒为正））；未到访的检查点 `visits`
+  为空数组）与 `thresholds`（口径：`max_checkpoints=10`、`min_radius_m=1`、
+  `max_radius_m=1000`、`default_radius_m=50`、`max_gap_s=600`）。
+- **错误**：轨迹相邻点时间未递增（零时差或倒序）时返回 `400` 与中文提示；
+  `track_id` 不存在返回 `404`；检查点超过 10 个或参数越界返回 `422`。
+
+示例：
+
+```bash
+curl -X POST http://localhost:8000/api/checkpoint-visits \
+  -H "Content-Type: application/json" \
+  -d '{"track_id": "<上传返回的 track_id>", "checkpoints": [{"lat": 31.0, "lon": 121.0, "radius_m": 50, "name": "家"}]}'
 ```

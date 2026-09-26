@@ -41,7 +41,7 @@ def haversine_m(a: TrackPoint, b: TrackPoint) -> float:
     return 2 * EARTH_RADIUS_M * math.asin(min(1.0, math.sqrt(h)))
 
 
-def _to_xy(lat: float, lon: float, lat0: float, lon0: float) -> tuple:
+def to_local_xy(lat: float, lon: float, lat0: float, lon0: float) -> tuple:
     """以 (lat0, lon0) 为原点的局部等距圆柱投影（米）。对纬度/经度是线性的。"""
     x = math.radians(lon - lon0) * math.cos(math.radians(lat0)) * EARTH_RADIUS_M
     y = math.radians(lat - lat0) * EARTH_RADIUS_M
@@ -53,8 +53,8 @@ def point_segment_distance_m(p: TrackPoint, a: TrackPoint, b: TrackPoint) -> flo
 
     在以 a 为原点的局部等距圆柱投影中计算；a、b 重合时退化为 p 到 a 的距离。
     """
-    px, py = _to_xy(p.lat, p.lon, a.lat, a.lon)
-    bx, by = _to_xy(b.lat, b.lon, a.lat, a.lon)
+    px, py = to_local_xy(p.lat, p.lon, a.lat, a.lon)
+    bx, by = to_local_xy(b.lat, b.lon, a.lat, a.lon)
     seg_len2 = bx * bx + by * by
     if seg_len2 == 0.0:
         return math.hypot(px, py)
@@ -64,18 +64,18 @@ def point_segment_distance_m(p: TrackPoint, a: TrackPoint, b: TrackPoint) -> flo
 
 
 def _inside(p: TrackPoint, circle: MaskCircle) -> bool:
-    x, y = _to_xy(p.lat, p.lon, circle.lat, circle.lon)
+    x, y = to_local_xy(p.lat, p.lon, circle.lat, circle.lon)
     return x * x + y * y < circle.radius_m * circle.radius_m
 
 
-def _segment_circle_crossings(a: TrackPoint, b: TrackPoint, circle: MaskCircle) -> list:
+def segment_circle_crossings(a: TrackPoint, b: TrackPoint, circle: MaskCircle) -> list:
     """返回线段 ab 与圆周的交点参数 t（0 < t < 1），t 为沿线段的比例。
 
     在圆心局部投影中求解 |a + t*(b-a)|^2 = r^2；即使 a、b 都在圆外，
     只要线段穿越圆（判别式 > 0）也会返回两个交点。
     """
-    ax, ay = _to_xy(a.lat, a.lon, circle.lat, circle.lon)
-    bx, by = _to_xy(b.lat, b.lon, circle.lat, circle.lon)
+    ax, ay = to_local_xy(a.lat, a.lon, circle.lat, circle.lon)
+    bx, by = to_local_xy(b.lat, b.lon, circle.lat, circle.lon)
     dx, dy = bx - ax, by - ay
     A = dx * dx + dy * dy
     if A == 0.0:
@@ -143,7 +143,7 @@ def mask_track(segments: list, circles: list) -> MaskResult:
         for a, b in zip(seg, seg[1:]):
             ts = set()
             for c in circles:
-                ts.update(_segment_circle_crossings(a, b, c))
+                ts.update(segment_circle_crossings(a, b, c))
             bounds = [0.0] + sorted(ts) + [1.0]
             for t0, t1 in zip(bounds, bounds[1:]):
                 p0 = a if t0 == 0.0 else _interp(a, b, t0)

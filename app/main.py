@@ -1,4 +1,4 @@
-"""FastAPI 入口：上传 GPX、遮蔽计算、导出、分段配速、海拔分析、漂移修复、停留识别、轨迹精简、双人轨迹相遇、静态页面。"""
+"""FastAPI 入口：上传 GPX、遮蔽计算、导出、分段配速、海拔分析、漂移修复、停留识别、轨迹精简、双人轨迹相遇、检查点到访、静态页面。"""
 from __future__ import annotations
 
 import uuid
@@ -10,6 +10,15 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .checkpoint import (
+    DEFAULT_RADIUS_M as CP_DEFAULT_RADIUS_M,
+    MAX_CHECKPOINTS,
+    MAX_GAP_S as CP_MAX_GAP_S,
+    MAX_RADIUS_M as CP_MAX_RADIUS_M,
+    MIN_RADIUS_M as CP_MIN_RADIUS_M,
+    Checkpoint,
+    find_checkpoint_visits,
+)
 from .drift import MAX_SPEED_MPS, MIN_OFFSET_M, fix_drift
 from .elevation import RESAMPLE_STEP_M, REVERSAL_THRESHOLD_M, elevation_profile
 from .encounter import MAX_GAP_S as ENCOUNTER_MAX_GAP_S
@@ -85,6 +94,20 @@ class SimplifyRequest(BaseModel):
 class EncounterRequest(BaseModel):
     track_id: str
     other_track_id: str
+
+
+class CheckpointIn(BaseModel):
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+    radius_m: float = Field(
+        default=CP_DEFAULT_RADIUS_M, ge=CP_MIN_RADIUS_M, le=CP_MAX_RADIUS_M
+    )
+    name: str = Field(default="", max_length=50)
+
+
+class CheckpointVisitsRequest(BaseModel):
+    track_id: str
+    checkpoints: list[CheckpointIn] = Field(default=[], max_length=MAX_CHECKPOINTS)
 
 
 def _point_dict(p):
@@ -432,6 +455,53 @@ def encounters(req: EncounterRequest):
             "radius_m": MEET_RADIUS_M,
             "min_meet_s": MIN_MEET_S,
             "max_gap_s": ENCOUNTER_MAX_GAP_S,
+        },
+    }
+
+
+def _visit_dict(v):
+    return {
+        "seg_index": v.seg_index,
+        "start_time": v.start_time.isoformat(),
+        "end_time": v.end_time.isoformat(),
+        "duration_s": v.duration_s,
+    }
+
+
+@app.post("/api/checkpoint-visits")
+def checkpoint_visits(req: CheckpointVisitsRequest):
+    """检查点到访分析：基于上传时保存的原始轨迹计算（不修改原轨迹），
+    每个检查点独立合并连续圆内区间，仅列出正时长到访；不跨 trkseg 或
+    超过 600 秒的采样间隔插值、合并。"""
+    track = _get_track(req.track_id)
+    checkpoints = [
+        Checkpoint(lat=c.lat, lon=c.lon, radius_m=c.radius_m, name=c.name.strip())
+        for c in req.checkpoints
+    ]
+    try:
+        results = find_checkpoint_visits(track["segments"], checkpoints)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "checkpoints": [
+            {
+                "index": r.index,
+                "name": r.name,
+                "lat": r.lat,
+                "lon": r.lon,
+                "radius_m": r.radius_m,
+                "visit_count": len(r.visits),
+                "total_duration_s": r.total_duration_s,
+                "visits": [_visit_dict(v) for v in r.visits],
+            }
+            for r in results
+        ],
+        "thresholds": {
+            "max_checkpoints": MAX_CHECKPOINTS,
+            "min_radius_m": CP_MIN_RADIUS_M,
+            "max_radius_m": CP_MAX_RADIUS_M,
+            "default_radius_m": CP_DEFAULT_RADIUS_M,
+            "max_gap_s": CP_MAX_GAP_S,
         },
     }
 
