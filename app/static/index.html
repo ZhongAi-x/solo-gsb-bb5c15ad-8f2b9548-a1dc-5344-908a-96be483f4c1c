@@ -9,7 +9,7 @@
 <body>
   <header>
     <h1>徒步轨迹分享</h1>
-    <p>上传含时间的 GPX → 自动统计分段配速、海拔剖面、识别停留点并检测单点漂移跳点 → 按误差阈值精简轨迹 → 在预览图上点击敏感地点并设定遮蔽半径 → 导出按遮蔽圆裁切、互不连接的 GPX 分段；可再上传第二条轨迹，自动分析双人相遇（距离 ≤ 50 米且持续 ≥ 60 秒）</p>
+    <p>上传含时间的 GPX → 自动统计分段配速、海拔剖面、识别停留点并检测单点漂移跳点 → 按误差阈值精简轨迹 → 在预览图上点击敏感地点并设定遮蔽半径 → 导出按遮蔽圆裁切、互不连接的 GPX 分段；可再上传第二条轨迹，自动分析双人相遇（距离 ≤ 50 米且持续 ≥ 60 秒）；也可在预览图上放置最多 10 个检查点，自动统计每次到访的进入、离开时间与停留秒数</p>
   </header>
   <main>
     <section class="panel">
@@ -31,12 +31,20 @@
     </section>
 
     <section class="preview">
+      <div class="map-toolbar">
+        <div class="mode-switch" role="group" aria-label="预览图编辑模式">
+          <button type="button" id="mode-mask" class="mode active">遮蔽模式</button>
+          <button type="button" id="mode-checkpoint" class="mode">检查点模式</button>
+        </div>
+        <span id="mode-hint" class="hint">遮蔽模式：点击预览图添加遮蔽圆</span>
+      </div>
       <canvas id="map"></canvas>
       <div class="legend">
         <span><i class="sw original"></i>原始轨迹</span>
         <span><i class="sw visible"></i>可见轨迹</span>
         <span><i class="sw hidden"></i>被隐藏段</span>
         <span><i class="sw circle"></i>遮蔽圆</span>
+        <span><i class="sw checkpoint"></i>检查点</span>
         <span><i class="sw drift"></i>漂移跳点</span>
         <span><i class="sw stay"></i>停留点</span>
         <span><i class="sw simplify"></i>精简轨迹</span>
@@ -115,6 +123,23 @@
       相邻采样间隔 &gt; 10 分钟视为断档，不跨断档插值）；仅比较时间重叠的线段，位置按时间
       线性插值，在局部米制平面求两人距离 ≤ 50 米的连续区间；相接区间合并后持续 ≥ 60 秒
       记为一次相遇，不跨断档或 trkseg 虚构相遇。相遇位置以粉红色"遇"标记在预览图上</p>
+  </section>
+
+  <section class="checkpoint">
+    <h2>11. 检查点到访</h2>
+    <p class="hint">把上方预览图切换到<strong>检查点模式</strong>后，在图上<strong>点击</strong>即可添加检查点
+      （最多 10 个，与遮蔽圆分别管理、互不影响）；半径 1～1000 米，默认 50 米；可命名、改半径或删除。</p>
+    <label class="row">新检查点半径（米）
+      <input type="number" id="cp-radius" value="50" min="1" max="1000" step="1">
+      <span class="hint">范围 1～1000，默认 50</span>
+    </label>
+    <ul id="cp-list"></ul>
+    <button id="clear-checkpoints" class="secondary">清除全部检查点</button>
+    <div id="checkpoint-visits" class="info muted">添加检查点后自动统计到访</div>
+    <p class="hint">判定：以检查点圆心做局部米制投影，逐条采样线段求进入圆内的比例区间，进出时间按线段比例
+      在两端采样时间之间插值；两端都在圆外但线段穿圆也会识别，相切不计。同一检查点的连续圆内区间合并为一次到访，
+      仅列出正时长到访；起/止在圆内时取该连续记录的端点时间。不跨 trkseg 或超过 10 分钟的采样间隔插值、合并；
+      段内时间不递增返回错误。统计复用上传的原始轨迹，不修改原轨迹，与遮蔽、精简等结果互不影响。</p>
   </section>
 
   <div id="message" hidden></div>

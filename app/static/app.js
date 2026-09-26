@@ -7,7 +7,9 @@ const state = {
   trackId: null,
   name: null,
   segments: [],   // 原始轨迹 [[{lat,lon,ele,time},...],...]
-  circles: [],    // [{lat, lon, radius_m}]
+  circles: [],    // 遮蔽圆 [{lat, lon, radius_m}]
+  checkpoints: [], // 检查点 [{id, lat, lon, radius_m, name}]，与遮蔽圆分别管理
+  editMode: "mask", // 预览图编辑模式："mask"（遮蔽）| "checkpoint"（检查点）
   masked: null,   // /api/mask 返回结果
   elevation: null, // /api/elevation 返回结果
   steep: null,    // /api/steep-sections 返回结果
@@ -17,8 +19,12 @@ const state = {
   otherTrackId: null, // 对比轨迹（第二条上传的 GPX）
   otherName: null,
   encounters: null, // /api/encounters 返回结果
+  checkpointVisits: null, // /api/checkpoint-visits 返回结果
   transform: null,
 };
+
+const MAX_CHECKPOINTS = 10;
+let checkpointSeq = 0;
 
 const canvas = document.getElementById("map");
 const ctx = canvas.getContext("2d");
@@ -139,6 +145,33 @@ function draw() {
     ctx.setLineDash([]);
   }
 
+  // 检查点（靛蓝实线圆 + 序号），与遮蔽圆分别管理
+  state.checkpoints.forEach((c, i) => {
+    const [x, y] = toPx(c.lat, c.lon);
+    const ry = (c.radius_m / METERS_PER_DEG_LAT) * t.scale;
+    const rx =
+      (c.radius_m / (METERS_PER_DEG_LAT * Math.cos((c.lat * Math.PI) / 180))) *
+      t.cosLat * t.scale;
+    ctx.beginPath();
+    ctx.ellipse(x, y, Math.max(rx, 2), Math.max(ry, 2), 0, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(48, 63, 159, 0.12)";
+    ctx.fill();
+    ctx.strokeStyle = "#303f9f";
+    ctx.lineWidth = 1.8 * dpr;
+    ctx.stroke();
+    // 圆心序号徽标
+    ctx.beginPath();
+    ctx.arc(x, y, 9 * dpr, 0, Math.PI * 2);
+    ctx.fillStyle = "#303f9f";
+    ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.font = `bold ${9 * dpr}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(String(i + 1), x, y);
+    ctx.textBaseline = "alphabetic";
+  });
+
   // 起点 / 终点标记
   const first = state.segments[0] && state.segments[0][0];
   const lastSeg = state.segments[state.segments.length - 1];
@@ -212,6 +245,8 @@ async function uploadFile(file) {
   state.name = data.name;
   state.segments = data.segments;
   state.circles = [];
+  state.checkpoints = [];
+  state.checkpointVisits = null;
   state.masked = null;
   state.elevation = null;
   state.steep = null;
@@ -224,6 +259,7 @@ async function uploadFile(file) {
   computeTransform();
   renderTrackInfo(data.stats);
   renderCircleList();
+  renderCheckpointList();
   await refreshMask();
   await refreshPace();
   await refreshElevation();
@@ -232,6 +268,7 @@ async function uploadFile(file) {
   await refreshStays();
   await refreshSimplify();
   await refreshEncounters();
+  await refreshCheckpointVisits();
 }
 
 let paceTimer = null;
@@ -496,6 +533,58 @@ function saveBlob(blob, filename) {
   URL.revokeObjectURL(url);
 }
 
+/* ---------- 检查点到访 ---------- */
+
+function cpRadiusValue() {
+  const input = document.getElementById("cp-radius");
+  let v = Number(input.value);
+  if (!input.value || !Number.isFinite(v)) v = 50;
+  return Math.min(1000, Math.max(1, v));
+}
+
+let cpTimer = null;
+function scheduleCheckpointVisits() {
+  clearTimeout(cpTimer);
+  cpTimer = setTimeout(refreshCheckpointVisits, 250);
+}
+
+async function refreshCheckpointVisits() {
+  const el = document.getElementById("checkpoint-visits");
+  if (!state.trackId) {
+    state.checkpointVisits = null;
+    return;
+  }
+  if (!state.checkpoints.length) {
+    state.checkpointVisits = null;
+    el.classList.add("muted");
+    el.textContent = "添加检查点后自动统计到访";
+    return;
+  }
+  try {
+    const res = await fetch("/api/checkpoint-visits", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        track_id: state.trackId,
+        checkpoints: state.checkpoints.map((c) => ({
+          lat: c.lat,
+          lon: c.lon,
+          radius_m: c.radius_m,
+          name: c.name || "",
+        })),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(errDetail(data, "检查点到访分析失败"));
+    state.checkpointVisits = data;
+    renderCheckpointVisits(data);
+  } catch (err) {
+    state.checkpointVisits = null;
+    el.classList.remove("muted");
+    el.innerHTML = `<div class="pace-error">无法分析检查点到访：${escapeHtml(err.message)}</div>`;
+  }
+}
+
 /* ---------- 界面渲染 ---------- */
 
 function fmtKm(m) {
@@ -523,6 +612,10 @@ function fmtPace(paceMinPerKm) {
 
 function fmtTime(iso) {
   return new Date(iso).toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+function fmtDateTime(iso) {
+  return new Date(iso).toLocaleString("zh-CN", { hour12: false });
 }
 
 function errDetail(data, fallback) {
@@ -892,6 +985,95 @@ function renderCircleList() {
   draw();
 }
 
+function renderCheckpointList() {
+  const ul = document.getElementById("cp-list");
+  ul.innerHTML = "";
+  state.checkpoints.forEach((c, i) => {
+    const li = document.createElement("li");
+
+    const head = document.createElement("span");
+    head.className = "cp-head";
+    const idx = document.createElement("b");
+    idx.textContent = `#${i + 1}`;
+    const coord = document.createElement("span");
+    coord.className = "coord";
+    coord.textContent = `(${c.lat.toFixed(5)}, ${c.lon.toFixed(5)})`;
+    head.appendChild(idx);
+    head.appendChild(coord);
+
+    const name = document.createElement("input");
+    name.type = "text";
+    name.className = "cp-name";
+    name.value = c.name || "";
+    name.placeholder = "命名（可选）";
+    name.maxLength = 40;
+    name.addEventListener("change", () => {
+      c.name = name.value.trim();
+      scheduleCheckpointVisits();
+    });
+
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "1";
+    input.max = "1000";
+    input.value = Math.round(c.radius_m);
+    input.title = "半径（米）";
+    input.addEventListener("change", () => {
+      const v = Number(input.value);
+      c.radius_m = Number.isFinite(v) && v > 0 ? Math.min(v, 1000) : c.radius_m;
+      input.value = Math.round(c.radius_m);
+      scheduleCheckpointVisits();
+      draw();
+    });
+
+    const del = document.createElement("button");
+    del.textContent = "删除";
+    del.addEventListener("click", () => {
+      state.checkpoints.splice(i, 1);
+      renderCheckpointList();
+      scheduleCheckpointVisits();
+    });
+
+    li.appendChild(head);
+    li.appendChild(name);
+    li.appendChild(input);
+    li.appendChild(del);
+    ul.appendChild(li);
+  });
+  draw();
+}
+
+function renderCheckpointVisits(data) {
+  const el = document.getElementById("checkpoint-visits");
+  el.classList.remove("muted");
+  let html = "";
+  data.checkpoints.forEach((c, ci) => {
+    const title = `<div class="cp-result-head"><span class="cp-badge">${ci + 1}</span>` +
+      `<b>${escapeHtml(c.name)}</b>` +
+      ` <span class="coord">(${c.lat.toFixed(5)}, ${c.lon.toFixed(5)})，` +
+      `半径 ${Math.round(c.radius_m)} m</span></div>`;
+    if (!c.visits.length) {
+      html += title + '<div class="cp-empty">未到访</div>';
+      return;
+    }
+    const rows = c.visits.map((v, i) =>
+      "<tr>" +
+      `<td>${i + 1}</td>` +
+      `<td>${fmtDateTime(v.enter_time)}</td>` +
+      `<td>${fmtDateTime(v.leave_time)}</td>` +
+      `<td>${fmtDuration(v.duration_s)}</td>` +
+      `<td>${v.seg_index}</td>` +
+      "</tr>"
+    ).join("");
+    html += title +
+      `<div>到访 <b>${c.visit_count}</b> 次</div>` +
+      '<table class="pace-table cp-table"><thead><tr>' +
+      "<th>序</th><th>进入时间</th><th>离开时间</th><th>停留</th><th>原始分段</th>" +
+      `</tr></thead><tbody>${rows}</tbody></table>`;
+  });
+  el.innerHTML = html;
+}
+
 let messageTimer = null;
 function showMessage(text) {
   const el = document.getElementById("message");
@@ -936,6 +1118,24 @@ canvas.addEventListener("click", (e) => {
   const x = (e.clientX - rect.left) * dpr;
   const y = (e.clientY - rect.top) * dpr;
   const [lat, lon] = toLatLon(x, y);
+
+  if (state.editMode === "checkpoint") {
+    if (state.checkpoints.length >= MAX_CHECKPOINTS) {
+      showMessage(`检查点最多 ${MAX_CHECKPOINTS} 个，请先删除已有检查点`);
+      return;
+    }
+    state.checkpoints.push({
+      id: ++checkpointSeq,
+      lat,
+      lon,
+      radius_m: cpRadiusValue(),
+      name: "",
+    });
+    renderCheckpointList();
+    scheduleCheckpointVisits();
+    return;
+  }
+
   const radiusInput = Number(document.getElementById("radius").value);
   const radius = Number.isFinite(radiusInput) && radiusInput > 0 ? radiusInput : 200;
   state.circles.push({ lat, lon, radius_m: radius });
@@ -943,11 +1143,37 @@ canvas.addEventListener("click", (e) => {
   scheduleMask();
 });
 
+function setEditMode(mode) {
+  state.editMode = mode;
+  const maskBtn = document.getElementById("mode-mask");
+  const cpBtn = document.getElementById("mode-checkpoint");
+  const isMask = mode === "mask";
+  maskBtn.classList.toggle("active", isMask);
+  cpBtn.classList.toggle("active", !isMask);
+  document.getElementById("mode-hint").textContent = isMask
+    ? "遮蔽模式：点击预览图添加遮蔽圆"
+    : "检查点模式：点击预览图添加检查点（最多 10 个）";
+}
+
+document.getElementById("mode-mask").addEventListener("click", () => setEditMode("mask"));
+document.getElementById("mode-checkpoint").addEventListener("click", () => setEditMode("checkpoint"));
+
 document.getElementById("clear-circles").addEventListener("click", () => {
   if (!state.circles.length) return;
   state.circles = [];
   renderCircleList();
   scheduleMask();
+});
+
+document.getElementById("clear-checkpoints").addEventListener("click", () => {
+  if (!state.checkpoints.length) return;
+  state.checkpoints = [];
+  renderCheckpointList();
+  refreshCheckpointVisits();
+});
+
+document.getElementById("cp-radius").addEventListener("change", (e) => {
+  e.target.value = Math.round(cpRadiusValue());  // 越界/非法输入收敛到 1～1000
 });
 
 document.getElementById("download").addEventListener("click", downloadGpx);

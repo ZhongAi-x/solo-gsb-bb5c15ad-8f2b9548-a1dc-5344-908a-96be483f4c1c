@@ -10,6 +10,15 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .checkpoint import (
+    DEFAULT_RADIUS_M as CHECKPOINT_DEFAULT_RADIUS_M,
+    MAX_CHECKPOINTS,
+    MAX_GAP_S as CHECKPOINT_MAX_GAP_S,
+    MAX_RADIUS_M as CHECKPOINT_MAX_RADIUS_M,
+    MIN_RADIUS_M as CHECKPOINT_MIN_RADIUS_M,
+    Checkpoint,
+    find_checkpoint_visits,
+)
 from .drift import MAX_SPEED_MPS, MIN_OFFSET_M, fix_drift
 from .elevation import RESAMPLE_STEP_M, REVERSAL_THRESHOLD_M, elevation_profile
 from .encounter import MAX_GAP_S as ENCOUNTER_MAX_GAP_S
@@ -85,6 +94,22 @@ class SimplifyRequest(BaseModel):
 class EncounterRequest(BaseModel):
     track_id: str
     other_track_id: str
+
+
+class CheckpointIn(BaseModel):
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+    radius_m: float = Field(
+        default=CHECKPOINT_DEFAULT_RADIUS_M,
+        ge=CHECKPOINT_MIN_RADIUS_M,
+        le=CHECKPOINT_MAX_RADIUS_M,
+    )
+    name: str = Field(default="", max_length=40)
+
+
+class CheckpointVisitRequest(BaseModel):
+    track_id: str
+    checkpoints: list[CheckpointIn] = Field(default_factory=list)
 
 
 def _point_dict(p):
@@ -432,6 +457,58 @@ def encounters(req: EncounterRequest):
             "radius_m": MEET_RADIUS_M,
             "min_meet_s": MIN_MEET_S,
             "max_gap_s": ENCOUNTER_MAX_GAP_S,
+        },
+    }
+
+
+def _checkpoint_dict(name, lat, lon, radius_m, visits):
+    return {
+        "name": name,
+        "lat": lat,
+        "lon": lon,
+        "radius_m": radius_m,
+        "visit_count": len(visits),
+        "visits": [
+            {
+                "seg_index": v.seg_index,
+                "enter_time": v.start_time.isoformat(),
+                "leave_time": v.end_time.isoformat(),
+                "duration_s": v.duration_s,
+            }
+            for v in visits
+        ],
+    }
+
+
+@app.post("/api/checkpoint-visits")
+def checkpoint_visits(req: CheckpointVisitRequest):
+    """检查点到访分析：复用上传时保存的原始轨迹，逐检查点列出每次进入/离开
+    圆内的时间区间与停留秒数；解析线段与圆的交点插值进出时间，不跨 trkseg
+    或超过 600 秒的采样间隔插值、合并；不修改原轨迹。"""
+    track = _get_track(req.track_id)
+    if len(req.checkpoints) > MAX_CHECKPOINTS:
+        raise HTTPException(
+            status_code=400, detail=f"检查点最多 {MAX_CHECKPOINTS} 个"
+        )
+    checkpoints = [
+        Checkpoint(lat=c.lat, lon=c.lon, radius_m=c.radius_m, name=c.name.strip())
+        for c in req.checkpoints
+    ]
+    try:
+        results = find_checkpoint_visits(track["segments"], checkpoints)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "checkpoints": [
+            _checkpoint_dict(r.name, r.lat, r.lon, r.radius_m, r.visits)
+            for r in results
+        ],
+        "thresholds": {
+            "default_radius_m": CHECKPOINT_DEFAULT_RADIUS_M,
+            "min_radius_m": CHECKPOINT_MIN_RADIUS_M,
+            "max_radius_m": CHECKPOINT_MAX_RADIUS_M,
+            "max_checkpoints": MAX_CHECKPOINTS,
+            "max_gap_s": CHECKPOINT_MAX_GAP_S,
         },
     }
 
